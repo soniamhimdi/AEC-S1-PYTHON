@@ -133,7 +133,7 @@ PiExpression = (
     | PiIn
     | PiSubscript
     | PiAttribute
-    | PiAttributeAssignment
+    
 )
 
 PiStatement = (

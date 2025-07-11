@@ -3,9 +3,9 @@ from pithon.evaluator.primitive import check_type, get_primitive_dict
 from pithon.syntax import (
     PiAssignment, PiBinaryOperation, PiNumber, PiBool, PiStatement, PiProgram, PiSubscript, PiVariable,
     PiIfThenElse, PiNot, PiAnd, PiOr, PiWhile, PiNone, PiList, PiTuple, PiString,
-    PiFunctionDef, PiFunctionCall, PiFor, PiBreak, PiContinue, PiIn, PiReturn
+    PiFunctionDef, PiFunctionCall, PiFor, PiBreak, PiContinue, PiIn, PiReturn, PiClassDef, PiAttribute, PiAttributeAssignment
 )
-from pithon.evaluator.envvalue import EnvValue, VFunctionClosure, VList, VNone, VTuple, VNumber, VBool, VString
+from pithon.evaluator.envvalue import EnvValue, VFunctionClosure, VList, VNone, VTuple, VNumber, VBool, VString, VClassDef,VObject,VMethodClosure
 
 
 def initial_env() -> EnvFrame:
@@ -34,12 +34,21 @@ def evaluate(node: PiProgram, env: EnvFrame) -> EnvValue:
     else:
         raise TypeError(f"Type de nœud non supporté : {type(node)}")
 
-def evaluate_stmt(node: PiStatement, env: EnvFrame) -> EnvValue:
+def evaluate_stmt(node: PiStatement, env: EnvFrame) -> EnvValue: 
     """Évalue une instruction ou expression Pithon."""
 
     if isinstance(node, PiNumber):
         return VNumber(node.value)
-
+   
+    elif isinstance(node, PiClassDef):
+        return _evaluate_class_def(node, env)
+        
+    elif isinstance(node, PiAttribute):
+        return _evaluate_attribute(node, env)
+        
+    elif isinstance(node, PiAttributeAssignment):
+         return _evaluate_attribute_assignment(node, env)
+ 
     elif isinstance(node, PiBool):
         return VBool(node.value)
 
@@ -72,7 +81,7 @@ def evaluate_stmt(node: PiStatement, env: EnvFrame) -> EnvValue:
         value = evaluate_stmt(node.value, env)
         insert(env, node.name, value)
         return value
-
+    
     elif isinstance(node, PiIfThenElse):
         cond = evaluate_stmt(node.condition, env)
         cond = check_type(cond, VBool)
@@ -106,7 +115,7 @@ def evaluate_stmt(node: PiStatement, env: EnvFrame) -> EnvValue:
 
     elif isinstance(node, PiWhile):
         return _evaluate_while(node, env)
-
+   
     elif isinstance(node, PiFunctionDef):
         closure = VFunctionClosure(node, env)
         insert(env, node.name, closure)
@@ -205,30 +214,87 @@ def _evaluate_in(node: PiIn, env: EnvFrame) -> EnvValue:
             return VBool(False)
     else:
         raise TypeError("'in' n'est supporté que pour les listes et chaînes.")
+    
 
 def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
-    """Évalue un appel de fonction (primitive ou définie par l'utilisateur)."""
+    """Évalue un appel de fonction en gérant correctement le self des méthodes."""
     func_val = evaluate_stmt(node.function, env)
     args = [evaluate_stmt(arg, env) for arg in node.args]
-    # Fonction primitive
+
+    # Fonctions primitives
     if callable(func_val):
         return func_val(args)
-    # Fonction utilisateur
-    if not isinstance(func_val, VFunctionClosure):
-        raise TypeError("Tentative d'appel d'un objet non-fonction.")
-    funcdef = func_val.funcdef
-    closure_env = func_val.closure_env
-    call_env = EnvFrame(parent=closure_env)
+
+    # Méthodes (VMethodClosure)
+    if isinstance(func_val, VMethodClosure):
+        # On ajoute automatiquement self comme premier argument
+        args = [func_val.instance] + args
+        func_val = func_val.function
+
+    # Construction d'objet (appel de classe)
+    if isinstance(func_val, VClassDef):
+        obj = VObject(func_val, {})
+        # Si la classe a une méthode __init__, on l'appelle
+        if '__init__' in func_val.methods:
+            init_method = func_val.methods['__init__']
+            # On appelle __init__ avec l'objet comme self + les autres arguments
+            _call_method(init_method, obj, args, env)
+        return obj
+
+    #  Fonctions utilisateur normales
+    if isinstance(func_val, VFunctionClosure):
+        return _call_function(func_val, args, env)
+
+    raise TypeError(f"'{type(func_val).__name__}' is not callable")
+
+def _call_method(method: VFunctionClosure, instance: VObject, args: list[EnvValue], env: EnvFrame) -> EnvValue:
+    """Appelle une méthode avec son instance comme self."""
+    call_env = EnvFrame(parent=method.closure_env)
+    # On s'assure que le premier paramètre est bien 'self'
+    method.funcdef.arg_names[0] = 'self'
+    call_env.insert('self', instance)
+    
+    # Gestion des autres arguments
+    for i, arg_name in enumerate(method.funcdef.arg_names[1:], start=1):
+        if i < len(args) + 1:  # +1 car on a déjà mis self
+            call_env.insert(arg_name, args[i-1])
+        else:
+            raise TypeError(f"Argument manquant '{arg_name}' pour la méthode '{method.funcdef.name}'")
+
+    # Exécution
+    result = VNone(value=None)
+    try:
+        for stmt in method.funcdef.body:
+            result = evaluate_stmt(stmt, call_env)
+    except ReturnException:
+        pass  # __init__ ne doit pas retourner de valeur
+    return result
+
+def _call_function(func: VFunctionClosure, args: list[EnvValue], env: EnvFrame) -> EnvValue:
+    """Appelle une fonction normale avec gestion des arguments variables (*rest)."""
+    call_env = EnvFrame(parent=func.closure_env)
+    funcdef = func.funcdef
+    
+    # Nombre d'arguments normaux attendus
+    normal_arg_count = len(funcdef.arg_names)
+    
+    # Assigner les arguments positionnels
     for i, arg_name in enumerate(funcdef.arg_names):
         if i < len(args):
             call_env.insert(arg_name, args[i])
         else:
-            raise TypeError("Argument manquant pour la fonction.")
+            raise TypeError(f"Argument manquant '{arg_name}' pour la fonction '{funcdef.name}'")
+
+    # Gérer les arguments variables (*rest) s'ils existent
     if funcdef.vararg:
-        varargs = VList(args[len(funcdef.arg_names):])
-        call_env.insert(funcdef.vararg, varargs)
-    elif len(args) > len(funcdef.arg_names):
-        raise TypeError("Trop d'arguments pour la fonction.")
+        # Récupère les arguments supplémentaires
+        rest_args = args[normal_arg_count:]
+        # Les stocke dans une VList sous le nom du paramètre vararg
+        call_env.insert(funcdef.vararg, VList(rest_args))
+    elif len(args) > normal_arg_count:
+        raise TypeError(f"Trop d'arguments pour la fonction '{funcdef.name}' (attendus {normal_arg_count}, reçus {len(args)})")
+
+    # Exécution du corps de la fonction
     result = VNone(value=None)
     try:
         for stmt in funcdef.body:
@@ -236,6 +302,70 @@ def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
     except ReturnException as ret:
         return ret.value
     return result
+
+
+def _evaluate_class_def(node: PiClassDef, env: EnvFrame) -> EnvValue:
+    """Évalue une définition de classe."""
+    # Crée un nouvel environnement pour la classe
+    class_env = EnvFrame(parent=env)
+    
+    # Évalue les méthodes et les stocke dans un dictionnaire
+    methods = {}
+    for method_def in node.methods:
+        method_closure = VFunctionClosure(method_def, class_env)
+        methods[method_def.name] = method_closure
+    
+    # Crée la définition de classe
+    class_def = VClassDef(node.name, methods)
+    
+    # Enregistre la classe dans l'environnement courant
+    insert(env, node.name, class_def)
+    return VNone(value=None)
+
+
+def _evaluate_attribute(node: PiAttribute, env: EnvFrame) -> EnvValue:
+    """Évalue un accès à un attribut (obj.attr) en gérant:
+    - Les attributs d'instance
+    - Les méthodes d'instance
+    - Les méthodes de classe
+    """
+    obj = evaluate_stmt(node.object, env)
+    
+    # Si c'est un objet (instance de classe)
+    if isinstance(obj, VObject):
+        # D'abord vérifier les attributs d'instance
+        if node.attr in obj.attributes:
+            return obj.attributes[node.attr]
+        
+        # Ensuite vérifier les méthodes de classe
+        if node.attr in obj.class_def.methods:
+            method_closure = obj.class_def.methods[node.attr]
+            return VMethodClosure(method_closure, obj)  # Lie la méthode à l'instance
+
+        raise AttributeError(f"'{obj.class_def.name}' l'objet n'a pas d'attribut '{node.attr}'")
+
+    # Si c'est une classe (accès à une méthode de classe)
+    elif isinstance(obj, VClassDef):
+        if node.attr in obj.methods:
+            return obj.methods[node.attr]  # Retourne directement la closure (sans instance)
+
+        raise AttributeError(f"Class '{obj.name}' n'a pas d'attribut '{node.attr}'")
+
+    # Erreur pour les autres types
+    else:
+        raise TypeError(f"accès à un attribut sur un type qui n'est ni une classe ni un objet : {type(obj).__name__}")    
+
+def _evaluate_attribute_assignment(node: PiAttributeAssignment, env: EnvFrame) -> EnvValue:
+    """Évalue une affectation d'attribut."""
+    obj = evaluate_stmt(node.object, env)
+    value = evaluate_stmt(node.value, env)
+    
+    if isinstance(obj, VObject):
+        # Affectation d'un attribut d'instance
+        obj.attributes[node.attr] = value
+        return value
+    else:
+        raise TypeError("L'affectation d'attribut n'est possible que sur les objets")
 
 class ReturnException(Exception):
     """Exception pour retourner une valeur depuis une fonction."""
