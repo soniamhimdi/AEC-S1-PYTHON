@@ -245,7 +245,7 @@ def _evaluate_function_call(node: PiFunctionCall, env: EnvFrame) -> EnvValue:
     if isinstance(func_val, VFunctionClosure):
         return _call_function(func_val, args, env)
 
-    raise TypeError(f"'{type(func_val).__name__}' is not callable")
+    raise TypeError(f"'{type(func_val).__name__}' n'est pas callable ou n'est pas une fonction valide.")
 
 def _call_method(method: VFunctionClosure, instance: VObject, args: list[EnvValue], env: EnvFrame) -> EnvValue:
     """Appelle une méthode avec son instance comme self."""
